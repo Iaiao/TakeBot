@@ -11,15 +11,28 @@ use serde::export::fmt::Debug;
 use std::cmp::max;
 use rand::{thread_rng, Rng};
 use std::time::SystemTime;
+use PlayerColor::*;
 
 const TOKEN: &str = env!("taketoken");
 
 const A1: [&str; 8] = ["a", "b", "c", "d", "e", "f", "g", "h"];
 const A2: [&str; 8] = ["1", "2", "3", "4", "5", "6", "7", "8"];
 
-const WHITE: Color = Color::Fixed(232);
-const BLACK: Color = Color::Fixed(255);
-
+#[derive(Copy, Clone, PartialEq)]
+enum PlayerColor {
+    White,
+    Black,
+    Unknown
+}
+impl PlayerColor {
+    fn color(&self) -> Color {
+        match self {
+            White => Color::Fixed(232),
+            Black => Color::Fixed(255),
+            Unknown => Color::RGB(42, 42, 42)
+        }
+    }
+}
 
 const ENDPOINT_BASE: &str = "https://lichess.org";
 
@@ -51,7 +64,7 @@ fn main() {
     bot.setup_events();
 }
 
-fn get_tablebase_move(table: &Table, color: Color) -> Option<Move> {
+fn get_tablebase_move(table: &Table, color: PlayerColor) -> Option<Move> {
     let res = reqwest::blocking::get(&format!("{}{}", ENDPOINT_TABLEBASE, table.fen(color))).unwrap().text().unwrap();
     if let Ok(res) = serde_json::from_str::<TablebaseResponse>(&res) {
         Some(Move::from_str(&*res.moves[0].uci))
@@ -77,17 +90,12 @@ struct Bot;
 #[derive(Deserialize)]
 struct TablebaseResponse {
     wdl: i32,
-    // (2) win, (1) cursed win, (0) draw, (-1) blessed loss, (-2) loss, (null) unknown
     dtz: Option<i32>,
-    // distance to zeroing or null if unknown
     dtm: Option<i32>,
-    // depth to mate or null if unknown
     checkmate: bool,
     stalemate: bool,
     variant_win: Option<bool>,
-    // only in chess variants (atomic, antichess)
     variant_loss: Option<bool>,
-    // only in chess variants
     insufficient_material: bool,
     moves: Vec<TablebaseResponseMove>,
 }
@@ -289,7 +297,7 @@ struct Game {
     moves: Vec<Move>,
     table: Table,
     id: String,
-    color: Color,
+    my_color: PlayerColor,
 }
 
 impl Game {
@@ -298,7 +306,7 @@ impl Game {
             moves: Vec::new(),
             table: Table::default(),
             id,
-            color: Color::RGB(2, 2, 8),
+            my_color: Unknown,
         }
     }
     #[allow(unused)]
@@ -337,8 +345,8 @@ impl Game {
                 _ => "Black"
             };
             println!("Game {} started! We are playing {}", game_full.id, color);
-            self.color = if color == "White" { WHITE } else { BLACK };
-            if self.color == WHITE {
+            self.my_color = if color == "White" { White } else { Black };
+            if self.my_color == White {
                 self.make_move()
             }
         } else if let Ok(game_state) = serde_json::from_str::<GameStateEvent>(&s) {
@@ -346,7 +354,7 @@ impl Game {
             self.table.sync(&self.moves);
             match game_state.status.as_str() {
                 "started" => {
-                    if self.moves.len() % 2 == 0 && self.color == WHITE || self.moves.len() % 2 == 1 && self.color == BLACK {
+                    if self.moves.len() % 2 == 0 && self.my_color == White || self.moves.len() % 2 == 1 && self.my_color == Black {
                         self.make_move();
                     }
                 }
@@ -390,16 +398,16 @@ impl Game {
         if self.table.pieces().len() <= 7 {
             // tablebase on
             println!("Tablebase on");
-            let m = get_tablebase_move(&self.table, self.color);
+            let m = get_tablebase_move(&self.table, self.my_color);
             if m.is_some() && self.send_move(m.unwrap()) {
                 self.table.process_move(m.unwrap());
                 return;
             }
-        } else if self.table.score(opposite(self.color)) - self.table.score(self.color) > 20 && self.table.score(self.color) < 20 {
+        } else if self.table.score(opposite(self.my_color)) - self.table.score(self.my_color) > 20 && self.table.score(self.my_color) < 20 {
             self.resign();
             return;
         }
-        let mut moves: Vec<(i32, Move)> = self.table.available_moves(self.color).iter().filter(|x| self.table.is_move_legal(x)).map(|x| (self.table.move_score(*x), *x)).collect();
+        let mut moves: Vec<(i32, Move)> = self.table.available_moves(self.my_color).iter().filter(|x| self.table.is_move_legal(x)).map(|x| (self.table.move_score(*x), *x)).collect();
         moves.sort_by(|a, b| b.0.cmp(&a.0));
         let mut i = 0;
 
@@ -412,7 +420,7 @@ impl Game {
                 return;
             }
             let (v, m) = moves[i];
-            if self.table.assume_move(m).in_check(self.color) || !self.send_move(m) {
+            if self.table.assume_move(m).in_check(self.my_color) || !self.send_move(m) {
                 i += 1;
                 moves.remove(moves.iter().position(|x| x == &(v, m)).unwrap_or(0));
                 if i < 100000 {
@@ -522,10 +530,10 @@ impl Default for Table {
     }
 }
 
-fn color_to_str(color: Color) -> String {
-    if color == WHITE {
+fn color_to_str(color: PlayerColor) -> String {
+    if color == White {
         "white"
-    } else if color == BLACK {
+    } else if color == Black {
         "black"
     } else {
         "err"
@@ -533,7 +541,7 @@ fn color_to_str(color: Color) -> String {
 }
 
 impl Table {
-    fn fen(&self, color: Color) -> String {
+    fn fen(&self, player_to_move: PlayerColor) -> String {
         let mut s = "".to_string();
 
         // position
@@ -568,7 +576,7 @@ impl Table {
 
         // who moves next
         s += " ";
-        s += if color == WHITE { "w" } else { "b" };
+        s += if player_to_move == White { "w" } else { "b" };
 
         // castling (castling in endgame?)
         s += " -";
@@ -581,12 +589,12 @@ impl Table {
 
         s
     }
-    fn in_check(&self, color: Color) -> bool {
-        let king = if color == WHITE { Piece::WhiteKing } else { Piece::BlackKing };
+    fn in_check(&self, color: PlayerColor) -> bool {
+        let king = if color == White { Piece::WhiteKing } else { Piece::BlackKing };
         let pieces = self.pieces_colored(color);
         let d = (Position(0, 0), king);
         let (king_pos, _) = pieces.iter().find(|(_, p)| p == &king).unwrap_or(&d);
-        let opposite = if color == WHITE { BLACK } else { WHITE };
+        let opposite = if color == White { Black } else { White };
         for (pos, piece) in self.pieces_colored(opposite) {
             let m = Move::new(pos, king_pos.clone());
             if piece.moves(pos).contains(&m) && self.is_move_legal(&m) {
@@ -595,7 +603,7 @@ impl Table {
         }
         false
     }
-    fn score(&self, color: Color) -> i32 {
+    fn score(&self, color: PlayerColor) -> i32 {
         self.pieces_colored(color).iter().map(|x| x.1.value()).sum()
     }
     fn print(&self) {
@@ -604,7 +612,7 @@ impl Table {
         self.0.iter().for_each(|row| {
             row.iter().for_each(|piece| {
                 let mut s = piece.to_string();
-                s = piece.color().bold().on(if white { Color::Fixed(253) } else { Color::Fixed(238) }).paint(format!(" {} ", s)).to_string();
+                s = piece.color().color().bold().on(if white { Color::Fixed(253) } else { Color::Fixed(238) }).paint(format!(" {} ", s)).to_string();
                 str += &s;
                 white = !white;
             });
@@ -643,10 +651,10 @@ impl Table {
             }
         }
     }
-    fn pieces_colored(&self, color: Color) -> Vec<(Position, Piece)> {
+    fn pieces_colored(&self, color: PlayerColor) -> Vec<(Position, Piece)> {
         self.pieces().iter_mut().filter(|p| p.1.color() == color).map(|p| *p).collect()
     }
-    fn available_moves(&self, color: Color) -> Vec<Move> {
+    fn available_moves(&self, color: PlayerColor) -> Vec<Move> {
         let mut moves = Vec::new();
         let a = self.pieces_colored(color);
         for (pos, piece) in a {
@@ -772,7 +780,7 @@ impl Table {
 
         // Pawn promotion (for now, queen only)
         if piece.value() == 1 && (m.b.1 == 8 || m.b.1 == 1) {
-            piece = if piece.color() == WHITE { Piece::WhiteQueen } else { Piece::BlackQueen };
+            piece = if piece.color() == White { Piece::WhiteQueen } else { Piece::BlackQueen };
         }
 
         // Castling
@@ -809,43 +817,58 @@ impl Table {
 
         // take
         if self.get_piece_at(m.b).color() == opp_color {
-            score += self.get_piece_at(m.b).value() * 10;
+            score += self.get_piece_at(m.b).value() * 17;
         }
 
         // attack
         for m2 in t.available_moves(color) {
             if m2.a == m.b && self.get_piece_at(m2.b).color() == opp_color {
-                score += self.get_piece_at(m2.b).value() * 2;
+                let mut can_defend = false;
+                let t = t.assume_move(m2);
+                for m3 in t.available_moves(opp_color) {
+                    if m3.b == m2.b {
+                        can_defend = true;
+                        break;
+                    }
+                }
+                if !can_defend {
+                    score += self.get_piece_at(m2.b).value() * 2;
+                }
             }
+        }
+
+        // developing
+        if piece.value() > Piece::BlackPawn.value() && piece.value() != Piece::WhiteKing.value() && Table::default().get_piece_at(m.a) == piece {
+            score += 10;
         }
 
         // giveaway
         for m2 in t.available_moves(opp_color) {
-            if m.b == m2.b {
+            if t.get_piece_at(m2.b).color() == color {
                 let t = t.assume_move(m2);
-                let mut is_exchange = false;
-                if piece.value() < 5 {
-                    if piece.value() < t.get_piece_at(m2.a).value() {
-                        is_exchange = true;
+                let mut defended = false;
+                for m3 in t.available_moves(color) {
+                    if m3.b == m2.b && t.get_piece_at(m2.a).value() > piece.value() {
+                        defended = true;
                     }
                 }
-                if !is_exchange {
-                    score -= self.get_piece_at(m.a).value() * 15;
+                if !defended {
+                    score -= piece.value() * 18;
                 }
             }
         }
 
         // center
         if (m.b.0 == 4 || m.b.0 == 5) && (m.b.1 == 4 || m.b.1 == 5) {
-            score += 8;
+            score += 12;
         }
 
         score
     }
 }
 
-fn opposite(color: Color) -> Color {
-    if color == WHITE { BLACK } else { WHITE }
+fn opposite(color: PlayerColor) -> PlayerColor {
+    if color == White { Black } else { White }
 }
 
 #[derive(Copy, Clone, Debug, PartialOrd, PartialEq)]
@@ -891,21 +914,21 @@ impl Piece {
             Piece::WhitePawn | Piece::BlackPawn => 1,
         }
     }
-    fn color(&self) -> Color {
+    fn color(&self) -> PlayerColor {
         match self {
-            Piece::None => Color::RGB(2, 2, 8),
+            Piece::None => Unknown,
             Piece::BlackKing |
             Piece::BlackQueen |
             Piece::BlackRook |
             Piece::BlackKnight |
             Piece::BlackBishop |
-            Piece::BlackPawn => BLACK,
+            Piece::BlackPawn => Black,
             Piece::WhiteKing |
             Piece::WhiteQueen |
             Piece::WhiteRook |
             Piece::WhiteKnight |
             Piece::WhiteBishop |
-            Piece::WhitePawn => WHITE
+            Piece::WhitePawn => White
         }
     }
     fn moves(&self, pos: Position) -> Vec<Move> {
